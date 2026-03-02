@@ -1,12 +1,12 @@
 {
   "mcpServers": {
-    "RapidAPI Hub - Zillow56": {
+    "RapidAPI Hub - Private Zillow": {
       "command": "npx",
       "args": [
         "mcp-remote",
         "https://mcp.rapidapi.com",
         "--header",
-        "x-api-host: zillow56.p.rapidapi.com",
+        "x-api-host: private-zillow.p.rapidapi.com",
         "--header",
         "x-api-key: YOUR_RAPIDAPI_KEY_HERE"
       ]

@@ -174,17 +174,11 @@ function calcCF(m,pt,ov={}){
 }
 
 // ── RapidAPI hosts ────────────────────────────────────────────────────────────
-// Same key works for all APIs — subscribe to each individually on rapidapi.com.
-// MCP config: see .mcp.json.example (copy to .mcp.json and add your key).
+// All three confirmed subscribed. Same key works for all.
 const RH={
-  // zillow56 — confirmed /search endpoint, location param, props[] response
-  zil:"zillow56.p.rapidapi.com",
-  // Airbnb13 — subscribe free at rapidapi.com/search/airbnb13
-  air:"airbnb13.p.rapidapi.com",
-  // US Real Estate — subscribe free at rapidapi.com/search/us-real-estate
-  re:"us-real-estate.p.rapidapi.com",
-  // Mashvisor STR analytics — may need paid plan; used as bonus source
-  mash:"mashvisor.p.rapidapi.com",
+  zil:"private-zillow.p.rapidapi.com",                        // property for-sale listings
+  air:"airbnb-market-rental-intelligence-api.p.rapidapi.com", // live Airbnb listings + rates
+  adn:"airdna1.p.rapidapi.com",                               // STR market analytics
 };
 
 // Default key pre-loaded — user can override via the UI input
@@ -275,13 +269,13 @@ export default function App(){
     const d1=new Date(d0);d1.setDate(d1.getDate()+3);
     const fd=d=>d.toISOString().split("T")[0];
     const res=await Promise.all([
-      // 1. Zillow Realtime Scraper — live property search
+      // 1. private-zillow — for-sale listings
       tryApi("zillow",()=>api(RH.zil,"/search",{
         location:`${city}, ${m.state}`,
         page:"1",
       },apiKey)),
-      // 2. Airbnb13 — active listings with live nightly rates
-      tryApi("airbnb",()=>api(RH.air,"/search_property",{
+      // 2. Airbnb Market & Rental Intelligence — live listings + nightly rates
+      tryApi("airbnb",()=>api(RH.air,"/search",{
         location:`${city}, ${m.state}`,
         checkin:fd(d0),
         checkout:fd(d1),
@@ -289,17 +283,10 @@ export default function App(){
         page:"1",
         currency:"USD",
       },apiKey)),
-      // 3. US Real Estate v2 — MLS / Redfin listing data
-      tryApi("mls",()=>api(RH.re,"/v2/for-sale",{
-        city,
-        state_code:m.state,
-        limit:"10",
-        offset:"0",
-      },apiKey)),
-      // 4. Mashvisor STR analytics (bonus source — may need paid plan)
-      tryApi("str_data",()=>api(RH.mash,"/v1.1/client/city/overview",{
-        city:city.replace(/ /g,"+"),
-        state:m.state,
+      // 3. AirDNA — STR market analytics (occupancy, ADR, revenue)
+      tryApi("airdna",()=>api(RH.adn,"/market",{
+        location:`${city}, ${m.state}`,
+        currency:"USD",
       },apiKey)),
     ]);
     setApiRes(p=>({...p,[m.id]:res}));
@@ -310,16 +297,9 @@ export default function App(){
     if(!apiKey||!addr)return;
     setLd(p=>({...p,a:true}));
     const res=await Promise.all([
-      // Zillow Realtime Scraper — address / city search
       tryApi("zillow",()=>api(RH.zil,"/search",{
         location:addr,
         page:"1",
-      },apiKey)),
-      // MLS / US Real Estate v2 address search
-      tryApi("mls",()=>api(RH.re,"/v2/for-sale",{
-        location:addr,
-        limit:"10",
-        offset:"0",
       },apiKey)),
     ]);
     setApiRes(p=>({...p,a:res}));
@@ -600,29 +580,41 @@ export default function App(){
             );
           })()}
 
-          {/* ── Airbnb live listings ── */}
+          {/* ── Airbnb Market & Rental Intelligence — live listings ── */}
           {(()=>{
             const aR=apiRes[liveMarket]?.find(r=>r.source==="airbnb");
             if(!aR)return null;
-            // airbnb13 wraps results in different shapes depending on version
-            const list=(aR.data?.results?.searchResults||aR.data?.searchResults||aR.data?.results||[]);
+            // Handle multiple response shapes from the Rental Intelligence API
+            const list=(
+              aR.data?.results?.searchResults||
+              aR.data?.searchResults||
+              aR.data?.listings||
+              aR.data?.results||
+              aR.data?.data||
+              (Array.isArray(aR.data)?aR.data:[])
+            );
             return(
               <div style={{...crd,marginBottom:12}}>
-                <div style={{fontSize:13,fontWeight:600,color:C.red,marginBottom:8}}>🏠 Airbnb Active Listings</div>
+                <div style={{fontSize:13,fontWeight:600,color:C.red,marginBottom:8}}>
+                  🏠 Airbnb Active Listings
+                  <span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>airbnb-market-rental-intelligence-api</span>
+                </div>
                 {aR.error?<div style={{fontSize:11,color:C.red}}>⚠ {aR.error}</div>:(
-                  list.length===0?<div style={{fontSize:11,color:"#556178"}}>No listings returned — check your Airbnb13 subscription on RapidAPI.</div>:
+                  list.length===0?<div style={{fontSize:11,color:"#556178"}}>No listings returned.</div>:
                   <div style={{display:"grid",gap:6}}>
                     {list.slice(0,6).map((r,i)=>{
                       const listing=r.listing||r;
-                      const nightlyAmt=r.pricingQuote?.rate?.amount||r.price?.rate||r.nightly_price||null;
-                      const rating=listing.avgRating||listing.avg_rating||listing.star_rating||null;
-                      const reviews=listing.reviewsCount||listing.reviews_count||0;
+                      const nightlyAmt=r.pricingQuote?.rate?.amount||r.price?.amount||r.price||listing.price||listing.nightly_price||null;
+                      const rating=listing.avgRating||listing.avg_rating||listing.rating||listing.star_rating||null;
+                      const reviews=listing.reviewsCount||listing.reviews_count||listing.reviews||0;
+                      const name=listing.name||r.name||`Listing ${i+1}`;
+                      const roomType=listing.roomType||listing.room_type||r.room_type||null;
                       return(
                         <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"8px 10px",background:"rgba(255,255,255,0.03)",borderRadius:6,gap:8,flexWrap:"wrap"}}>
                           <div>
-                            <div style={{fontSize:12,fontWeight:600,color:"#e8edf5"}}>{listing.name||`Listing ${i+1}`}</div>
+                            <div style={{fontSize:12,fontWeight:600,color:"#e8edf5"}}>{name}</div>
                             <div style={{fontSize:10,color:"#556178",marginTop:2}}>
-                              {[rating&&`★ ${Number(rating).toFixed(2)}`,reviews>0&&`(${reviews} reviews)`,listing.roomType||listing.room_type].filter(Boolean).join(" · ")}
+                              {[rating&&`★ ${Number(rating).toFixed(2)}`,reviews>0&&`(${reviews} reviews)`,roomType].filter(Boolean).join(" · ")}
                             </div>
                           </div>
                           <div style={{textAlign:"right",flexShrink:0}}>
@@ -637,59 +629,29 @@ export default function App(){
             );
           })()}
 
-          {/* ── MLS / US Real Estate ── */}
+          {/* ── AirDNA STR Market Analytics ── */}
           {(()=>{
-            const mR2=apiRes[liveMarket]?.find(r=>r.source==="mls");
-            if(!mR2)return null;
-            // us-real-estate wraps under data.home_search.results or data.results
-            const items=mR2.data?.data?.home_search?.results||mR2.data?.results||mR2.data?.properties||[];
+            const adR=apiRes[liveMarket]?.find(r=>r.source==="airdna");
+            if(!adR)return null;
+            // AirDNA response — try common field paths
+            const mkt=adR.data?.market||adR.data?.data||adR.data||{};
+            const occ=mkt.occupancy_rate||mkt.occupancy||mkt.avg_occupancy||null;
+            const adr=mkt.average_daily_rate||mkt.adr||mkt.avg_daily_rate||null;
+            const rev=mkt.revenue_potential||mkt.annual_revenue||mkt.avg_annual_revenue||null;
+            const active=mkt.active_listings||mkt.active_rentals||mkt.total_listings||null;
+            const revpar=mkt.revpar||mkt.revenue_per_available||null;
+            const stats=[[`Occupancy`,occ?`${Math.round(occ*(occ<2?100:1))}%`:null],[`Avg Daily Rate`,adr?fmtC(adr):null],[`Revenue/yr`,rev?fmtC(rev):null],[`Active Listings`,active?fmt(active):null],[`RevPAR`,revpar?fmtC(revpar):null]].filter(([,v])=>v);
             return(
               <div style={{...crd,marginBottom:12}}>
-                <div style={{fontSize:13,fontWeight:600,color:C.purple,marginBottom:8}}>📋 MLS / US Real Estate Listings</div>
-                {mR2.error?<div style={{fontSize:11,color:C.red}}>⚠ {mR2.error}</div>:(
-                  items.length===0?<div style={{fontSize:11,color:"#556178"}}>No MLS listings returned — check your US Real Estate subscription on RapidAPI.</div>:
-                  <div style={{display:"grid",gap:6}}>
-                    {items.slice(0,5).map((p,i)=>{
-                      const price=p.list_price||p.price||p.listPrice||null;
-                      const desc=p.description||{};
-                      const addr2=p.location?.address||p.address||{};
-                      const street=addr2.line||addr2.street||p.streetAddress||"—";
-                      return(
-                        <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"8px 10px",background:"rgba(255,255,255,0.03)",borderRadius:6,gap:8,flexWrap:"wrap"}}>
-                          <div>
-                            <div style={{fontSize:12,fontWeight:600,color:"#e8edf5"}}>{street}</div>
-                            <div style={{fontSize:10,color:"#556178",marginTop:2}}>
-                              {[(desc.beds||p.bedrooms)&&`${desc.beds||p.bedrooms}bd`,(desc.baths_full||p.bathrooms)&&`${desc.baths_full||p.bathrooms}ba`,(desc.sqft||p.sqft)&&`${fmt(desc.sqft||p.sqft)} sqft`].filter(Boolean).join(" · ")}
-                            </div>
-                          </div>
-                          <div style={{textAlign:"right",flexShrink:0}}>
-                            {price?<div style={{fontSize:14,fontWeight:700,color:C.purple,fontFamily:"'JetBrains Mono',monospace"}}>{fmtC(price)}</div>:<div style={{fontSize:11,color:"#556178"}}>—</div>}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-
-          {/* ── Mashvisor STR analytics ── */}
-          {(()=>{
-            const sR=apiRes[liveMarket]?.find(r=>r.source==="str_data");
-            if(!sR)return null;
-            const d=sR.data?.result||sR.data;
-            const ab=d?.airbnb;
-            return(
-              <div style={{...crd,marginBottom:12}}>
-                <div style={{fontSize:13,fontWeight:600,color:C.orange,marginBottom:8}}>📊 STR Market Analytics (Mashvisor)</div>
-                {sR.error
-                  ?<div style={{fontSize:11,color:C.yellow}}>⚠ {sR.error} — Mashvisor may require a paid subscription or has updated its endpoints.</div>
-                  :ab?(
-                    <div className="gm">
-                      {[["Airbnb Occ",ab.occupancy?`${Math.round(ab.occupancy*100)}%`:null],["Avg Daily Rate",ab.average_daily_rate?fmtC(ab.average_daily_rate):null],["Annual Revenue",ab.rental_income?fmtC(ab.rental_income)+"/yr":null]].filter(([,v])=>v).map(([l,v],i)=><Metric key={i} label={l} value={v} color={C.orange}/>)}
-                    </div>
-                  ):<div style={{fontSize:11,color:"#556178"}}>No STR data returned.</div>
+                <div style={{fontSize:13,fontWeight:600,color:C.orange,marginBottom:8}}>
+                  📊 AirDNA STR Market Analytics
+                  <span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>airdna1</span>
+                </div>
+                {adR.error
+                  ?<div style={{fontSize:11,color:C.red}}>⚠ {adR.error}</div>
+                  :stats.length>0
+                    ?<div className="gm">{stats.map(([l,v],i)=><Metric key={i} label={l} value={v} color={C.orange}/>)}</div>
+                    :<div style={{fontSize:11,color:"#556178",padding:"4px 0"}}>No STR stats returned — the market endpoint may use different params. Raw: <code style={{fontSize:9,color:"#3d4a5e"}}>{JSON.stringify(adR.data).slice(0,120)}</code></div>
                 }
               </div>
             );
@@ -731,10 +693,9 @@ export default function App(){
             <div style={{fontSize:13,fontWeight:600,color:C.yellow,marginBottom:10}}>🔑 RapidAPI Setup — Subscribe to each API (one key unlocks all)</div>
             <div className="g2">
               {[
-                {n:"Zillow56",h:"zillow56.p.rapidapi.com",d:"Live for-sale listings, Zestimate, RentZestimate — /search endpoint",c:C.blue,ok:true},
-                {n:"Airbnb13",h:"airbnb13.p.rapidapi.com",d:"Live Airbnb listings, nightly rates, ratings — 700k+ subscribers",c:C.red,ok:true},
-                {n:"US Real Estate",h:"us-real-estate.p.rapidapi.com",d:"MLS / Redfin listing data — great Zillow alternative",c:C.purple,ok:true},
-                {n:"Mashvisor STR",h:"mashvisor.p.rapidapi.com",d:"STR city-level occupancy & ADR analytics — may need paid plan",c:C.orange,ok:false},
+                {n:"Private Zillow",h:"private-zillow.p.rapidapi.com",d:"Live for-sale listings, Zestimate, RentZestimate — high-reliability Zillow data",c:C.blue,ok:true},
+                {n:"Airbnb Intelligence",h:"airbnb-market-rental-intelligence-api.p.rapidapi.com",d:"Airbnb market & rental intelligence — occupancy, ADR, revenue by market",c:C.red,ok:true},
+                {n:"AirDNA",h:"airdna1.p.rapidapi.com",d:"Gold-standard STR analytics — active listings, RevPAR, market scoring",c:C.green,ok:true},
               ].map((a,i)=>(
                 <div key={i} style={{padding:"8px 10px",background:"rgba(255,255,255,0.02)",borderRadius:6,border:`1px solid ${a.c}22`}}>
                   <div style={{display:"flex",justifyContent:"space-between",marginBottom:2,gap:4}}>
