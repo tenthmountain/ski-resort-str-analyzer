@@ -551,7 +551,7 @@ export default function App(){
                 <div style={{fontSize:13,fontWeight:600,color:C.blue,marginBottom:8}}>
                   🏠 Zillow Realtime Listings — {MARKETS.find(m=>m.id===liveMarket)?.name}
                   {total?<span style={{fontSize:10,color:"#556178",marginLeft:8}}>{total} total found</span>:null}
-                  <span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>zillow56</span>
+                  <span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>private-zillow</span>
                 </div>
                 {zR.error?<div style={{fontSize:11,color:C.red}}>⚠ {zR.error}</div>:(
                   props.length===0?<div style={{fontSize:11,color:"#556178"}}>No listings returned — check your Zillow Realtime Scraper subscription on RapidAPI.</div>:
