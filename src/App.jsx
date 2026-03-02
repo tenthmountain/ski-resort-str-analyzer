@@ -174,10 +174,11 @@ function calcCF(m,pt,ov={}){
 }
 
 // ── RapidAPI hosts ────────────────────────────────────────────────────────────
-// Subscribe to each at rapidapi.com — one key unlocks all.
+// Same key works for all APIs — subscribe to each individually on rapidapi.com.
+// MCP config: see .mcp.json.example (copy to .mcp.json and add your key).
 const RH={
-  // Zillow (unofficial) — most reliable property-search wrapper
-  zil:"zillow-com1.p.rapidapi.com",
+  // Zillow Realtime Scraper — live property data, matches .mcp.json MCP server
+  zil:"real-time-zillow-data.p.rapidapi.com",
   // Airbnb13 — 700k+ subscribers, actively maintained Airbnb scraper
   air:"airbnb13.p.rapidapi.com",
   // US Real Estate — MLS / Redfin listing data (Zillow alternative)
@@ -185,6 +186,9 @@ const RH={
   // Mashvisor STR analytics — may need paid plan; used as a bonus source
   mash:"mashvisor.p.rapidapi.com",
 };
+
+// Default key pre-loaded — user can override via the UI input
+const DEFAULT_KEY="324bb62945msh0c1c9f8832417e3p1b54f5jsn40aed8c43385";
 
 async function api(host,path,params,key){
   const url=new URL(`https://${host}${path}`);
@@ -240,8 +244,8 @@ const Status=({results,loading})=>{
 };
 
 export default function App(){
-  const[apiKey,setApiKey]=useState("");
-  const[apiIn,setApiIn]=useState("");
+  const[apiKey,setApiKey]=useState(DEFAULT_KEY);
+  const[apiIn,setApiIn]=useState(DEFAULT_KEY);
   const[view,setView]=useState("markets");
   const[selId,setSelId]=useState(null);
   const[pt,setPt]=useState("2br");
@@ -271,12 +275,10 @@ export default function App(){
     const d1=new Date(d0);d1.setDate(d1.getDate()+3);
     const fd=d=>d.toISOString().split("T")[0];
     const res=await Promise.all([
-      // 1. Zillow property listings — for-sale condos/townhomes
-      tryApi("zillow",()=>api(RH.zil,"/propertyExtendedSearch",{
+      // 1. Zillow Realtime Scraper — live property search
+      tryApi("zillow",()=>api(RH.zil,"/search",{
         location:`${city}, ${m.state}`,
-        home_type:"Apartments,Condos,Townhomes",
-        sort:"Price_Low_High",
-        status_type:"ForSale",
+        page:"1",
       },apiKey)),
       // 2. Airbnb13 — active listings with live nightly rates
       tryApi("airbnb",()=>api(RH.air,"/search_property",{
@@ -308,12 +310,10 @@ export default function App(){
     if(!apiKey||!addr)return;
     setLd(p=>({...p,a:true}));
     const res=await Promise.all([
-      // Zillow address search
-      tryApi("zillow",()=>api(RH.zil,"/propertyExtendedSearch",{
+      // Zillow Realtime Scraper — address / city search
+      tryApi("zillow",()=>api(RH.zil,"/search",{
         location:addr,
-        home_type:"Apartments,Condos,Townhomes",
-        sort:"Price_Low_High",
-        status_type:"ForSale",
+        page:"1",
       },apiKey)),
       // MLS / US Real Estate address search
       tryApi("mls",()=>api(RH.re,"/for-sale",{
@@ -554,30 +554,37 @@ export default function App(){
           {(()=>{
             const zR=apiRes[liveMarket]?.find(r=>r.source==="zillow");
             if(!zR)return null;
+            // Realtime Scraper returns props[] — field names: area (sqft), bedrooms, bathrooms, price, zestimate, rentZestimate
             const props=zR.data?.props||[];
+            const total=zR.data?.totalResultCount||zR.data?.resultsCount||null;
             return(
               <div style={{...crd,marginBottom:12}}>
                 <div style={{fontSize:13,fontWeight:600,color:C.blue,marginBottom:8}}>
-                  🏠 Zillow For-Sale Listings
-                  {zR.data?.totalResultCount?<span style={{fontSize:10,color:"#556178",marginLeft:8}}>{zR.data.totalResultCount} total found</span>:null}
+                  🏠 Zillow Realtime Listings — {MARKETS.find(m=>m.id===liveMarket)?.name}
+                  {total?<span style={{fontSize:10,color:"#556178",marginLeft:8}}>{total} total found</span>:null}
+                  <span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>real-time-zillow-data</span>
                 </div>
                 {zR.error?<div style={{fontSize:11,color:C.red}}>⚠ {zR.error}</div>:(
-                  props.length===0?<div style={{fontSize:11,color:"#556178"}}>No listings returned — check your Zillow subscription on RapidAPI.</div>:
+                  props.length===0?<div style={{fontSize:11,color:"#556178"}}>No listings returned — check your Zillow Realtime Scraper subscription on RapidAPI.</div>:
                   <div style={{display:"grid",gap:6}}>
-                    {props.slice(0,6).map((p,i)=>(
-                      <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"8px 10px",background:"rgba(255,255,255,0.03)",borderRadius:6,gap:8,flexWrap:"wrap"}}>
-                        <div>
-                          <div style={{fontSize:12,fontWeight:600,color:"#e8edf5"}}>{p.address||"—"}</div>
-                          <div style={{fontSize:10,color:"#556178",marginTop:2}}>
-                            {[p.bedrooms&&`${p.bedrooms}bd`,p.bathrooms&&`${p.bathrooms}ba`,p.livingArea&&`${fmt(p.livingArea)} sqft`,p.rentZestimate&&`RentZest $${fmt(p.rentZestimate)}/mo`].filter(Boolean).join(" · ")}
+                    {props.slice(0,6).map((p,i)=>{
+                      // Handle both old (livingArea) and new (area) field names
+                      const sqft=p.livingArea||p.area||null;
+                      return(
+                        <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"8px 10px",background:"rgba(255,255,255,0.03)",borderRadius:6,gap:8,flexWrap:"wrap"}}>
+                          <div>
+                            <div style={{fontSize:12,fontWeight:600,color:"#e8edf5"}}>{p.address||"—"}</div>
+                            <div style={{fontSize:10,color:"#556178",marginTop:2}}>
+                              {[p.bedrooms&&`${p.bedrooms}bd`,p.bathrooms&&`${p.bathrooms}ba`,sqft&&`${fmt(sqft)} sqft`,p.rentZestimate&&`RentZest $${fmt(p.rentZestimate)}/mo`].filter(Boolean).join(" · ")}
+                            </div>
+                          </div>
+                          <div style={{textAlign:"right",flexShrink:0}}>
+                            <div style={{fontSize:14,fontWeight:700,color:C.green,fontFamily:"'JetBrains Mono',monospace"}}>{p.price?fmtC(p.price):"—"}</div>
+                            {p.zestimate?<div style={{fontSize:9,color:"#556178"}}>Zest {fmtC(p.zestimate)}</div>:null}
                           </div>
                         </div>
-                        <div style={{textAlign:"right",flexShrink:0}}>
-                          <div style={{fontSize:14,fontWeight:700,color:C.green,fontFamily:"'JetBrains Mono',monospace"}}>{p.price?fmtC(p.price):"—"}</div>
-                          {p.zestimate?<div style={{fontSize:9,color:"#556178"}}>Zest {fmtC(p.zestimate)}</div>:null}
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -697,7 +704,7 @@ export default function App(){
                         <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"8px 10px",background:"rgba(255,255,255,0.03)",borderRadius:6,gap:8}}>
                           <div>
                             <div style={{fontSize:12,fontWeight:600,color:"#e8edf5"}}>{addr3}</div>
-                            <div style={{fontSize:10,color:"#556178"}}>{[p.bedrooms&&`${p.bedrooms}bd`,p.bathrooms&&`${p.bathrooms}ba`,p.livingArea&&`${fmt(p.livingArea)} sqft`].filter(Boolean).join(" · ")}</div>
+                            <div style={{fontSize:10,color:"#556178"}}>{[p.bedrooms&&`${p.bedrooms}bd`,p.bathrooms&&`${p.bathrooms}ba`,(p.livingArea||p.area)&&`${fmt(p.livingArea||p.area)} sqft`].filter(Boolean).join(" · ")}</div>
                           </div>
                           <div style={{fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:C.cyan,fontSize:13,flexShrink:0}}>{price2?fmtC(price2):"—"}</div>
                         </div>
@@ -715,7 +722,7 @@ export default function App(){
             <div style={{fontSize:13,fontWeight:600,color:C.yellow,marginBottom:10}}>🔑 RapidAPI Setup — Subscribe to each API (one key unlocks all)</div>
             <div className="g2">
               {[
-                {n:"Zillow (zillow-com1)",h:"zillow-com1.p.rapidapi.com",d:"For-sale listings, Zestimate, RentZestimate",c:C.blue,ok:true},
+                {n:"Zillow Realtime Scraper",h:"real-time-zillow-data.p.rapidapi.com",d:"Live for-sale listings, Zestimate, RentZestimate — MCP-enabled",c:C.blue,ok:true},
                 {n:"Airbnb13",h:"airbnb13.p.rapidapi.com",d:"Live Airbnb listings, nightly rates, ratings — 700k+ subscribers",c:C.red,ok:true},
                 {n:"US Real Estate",h:"us-real-estate.p.rapidapi.com",d:"MLS / Redfin listing data — great Zillow alternative",c:C.purple,ok:true},
                 {n:"Mashvisor STR",h:"mashvisor.p.rapidapi.com",d:"STR city-level occupancy & ADR analytics — may need paid plan",c:C.orange,ok:false},
