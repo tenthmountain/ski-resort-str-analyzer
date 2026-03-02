@@ -177,13 +177,13 @@ function calcCF(m,pt,ov={}){
 // Same key works for all APIs — subscribe to each individually on rapidapi.com.
 // MCP config: see .mcp.json.example (copy to .mcp.json and add your key).
 const RH={
-  // Zillow Realtime Scraper — live property data, matches .mcp.json MCP server
-  zil:"real-time-zillow-data.p.rapidapi.com",
-  // Airbnb13 — 700k+ subscribers, actively maintained Airbnb scraper
+  // zillow56 — confirmed /search endpoint, location param, props[] response
+  zil:"zillow56.p.rapidapi.com",
+  // Airbnb13 — subscribe free at rapidapi.com/search/airbnb13
   air:"airbnb13.p.rapidapi.com",
-  // US Real Estate — MLS / Redfin listing data (Zillow alternative)
+  // US Real Estate — subscribe free at rapidapi.com/search/us-real-estate
   re:"us-real-estate.p.rapidapi.com",
-  // Mashvisor STR analytics — may need paid plan; used as a bonus source
+  // Mashvisor STR analytics — may need paid plan; used as bonus source
   mash:"mashvisor.p.rapidapi.com",
 };
 
@@ -197,10 +197,10 @@ async function api(host,path,params,key){
   try{r=await fetch(url,{headers:{"x-rapidapi-key":key,"x-rapidapi-host":host}});}
   catch(e){throw new Error("Network/CORS error — run locally (npm run dev) or deploy to Vercel");}
   if(!r.ok){
-    const msg=r.status===401||r.status===403?"Invalid API key or not subscribed to this API on RapidAPI"
+    const msg=r.status===401||r.status===403?`Not subscribed — go to rapidapi.com and subscribe to "${host}" with your key`
              :r.status===429?"Rate limit exceeded — upgrade your RapidAPI plan or wait a moment"
-             :r.status===404?"Endpoint not found — API may have updated its routes"
-             :`HTTP ${r.status}`;
+             :r.status===404?`Endpoint not found on ${host} — API may have changed routes`
+             :`HTTP ${r.status} from ${host}`;
     throw new Error(msg);
   }
   return r.json();
@@ -571,7 +571,7 @@ export default function App(){
                 <div style={{fontSize:13,fontWeight:600,color:C.blue,marginBottom:8}}>
                   🏠 Zillow Realtime Listings — {MARKETS.find(m=>m.id===liveMarket)?.name}
                   {total?<span style={{fontSize:10,color:"#556178",marginLeft:8}}>{total} total found</span>:null}
-                  <span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>real-time-zillow-data</span>
+                  <span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>zillow56</span>
                 </div>
                 {zR.error?<div style={{fontSize:11,color:C.red}}>⚠ {zR.error}</div>:(
                   props.length===0?<div style={{fontSize:11,color:"#556178"}}>No listings returned — check your Zillow Realtime Scraper subscription on RapidAPI.</div>:
@@ -731,7 +731,7 @@ export default function App(){
             <div style={{fontSize:13,fontWeight:600,color:C.yellow,marginBottom:10}}>🔑 RapidAPI Setup — Subscribe to each API (one key unlocks all)</div>
             <div className="g2">
               {[
-                {n:"Zillow Realtime Scraper",h:"real-time-zillow-data.p.rapidapi.com",d:"Live for-sale listings, Zestimate, RentZestimate — MCP-enabled",c:C.blue,ok:true},
+                {n:"Zillow56",h:"zillow56.p.rapidapi.com",d:"Live for-sale listings, Zestimate, RentZestimate — /search endpoint",c:C.blue,ok:true},
                 {n:"Airbnb13",h:"airbnb13.p.rapidapi.com",d:"Live Airbnb listings, nightly rates, ratings — 700k+ subscribers",c:C.red,ok:true},
                 {n:"US Real Estate",h:"us-real-estate.p.rapidapi.com",d:"MLS / Redfin listing data — great Zillow alternative",c:C.purple,ok:true},
                 {n:"Mashvisor STR",h:"mashvisor.p.rapidapi.com",d:"STR city-level occupancy & ADR analytics — may need paid plan",c:C.orange,ok:false},
