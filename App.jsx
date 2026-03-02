@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ComposedChart, Area, Line } from "recharts";
 
 const MARKETS = [
@@ -173,8 +173,38 @@ function calcCF(m,pt,ov={}){
     peakPersonal,offPersonal,totalPersonal,displaced,peakAdr:Math.round(peakAdr),offAdr:Math.round(offAdr)};
 }
 
-const RH={mash:"mashvisor.p.rapidapi.com",zil:"zillow-com1.p.rapidapi.com",air:"airbnb-search.p.rapidapi.com",inc:"airbnb-income-prediction.p.rapidapi.com"};
-async function api(host,path,params,key){const url=new URL(`https://${host}${path}`);Object.entries(params).forEach(([k,v])=>{if(v!=null)url.searchParams.set(k,String(v))});const r=await fetch(url,{headers:{"x-rapidapi-key":key,"x-rapidapi-host":host}});if(!r.ok)throw new Error(`${r.status}`);return r.json();}
+// ── RapidAPI hosts ────────────────────────────────────────────────────────────
+// Same key works for all APIs — subscribe to each individually on rapidapi.com.
+// MCP config: see .mcp.json.example (copy to .mcp.json and add your key).
+const RH={
+  // Zillow Realtime Scraper — live property data, matches .mcp.json MCP server
+  zil:"real-time-zillow-data.p.rapidapi.com",
+  // Airbnb13 — 700k+ subscribers, actively maintained Airbnb scraper
+  air:"airbnb13.p.rapidapi.com",
+  // US Real Estate — MLS / Redfin listing data (Zillow alternative)
+  re:"us-real-estate.p.rapidapi.com",
+  // Mashvisor STR analytics — may need paid plan; used as a bonus source
+  mash:"mashvisor.p.rapidapi.com",
+};
+
+// Default key pre-loaded — user can override via the UI input
+const DEFAULT_KEY="324bb62945msh0c1c9f8832417e3p1b54f5jsn40aed8c43385";
+
+async function api(host,path,params,key){
+  const url=new URL(`https://${host}${path}`);
+  Object.entries(params).forEach(([k,v])=>{if(v!=null)url.searchParams.set(k,String(v))});
+  let r;
+  try{r=await fetch(url,{headers:{"x-rapidapi-key":key,"x-rapidapi-host":host}});}
+  catch(e){throw new Error("Network/CORS error — run locally (npm run dev) or deploy to Vercel");}
+  if(!r.ok){
+    const msg=r.status===401||r.status===403?"Invalid API key or not subscribed to this API on RapidAPI"
+             :r.status===429?"Rate limit exceeded — upgrade your RapidAPI plan or wait a moment"
+             :r.status===404?"Endpoint not found — API may have updated its routes"
+             :`HTTP ${r.status}`;
+    throw new Error(msg);
+  }
+  return r.json();
+}
 const tryApi=async(src,fn)=>{try{return{source:src,data:await fn()}}catch(e){return{source:src,error:e.message}}};
 
 const C={green:"#34d399",red:"#f87171",blue:"#63b3ed",yellow:"#fbbf24",purple:"#a78bfa",orange:"#fb923c",cyan:"#22d3ee"};
@@ -214,8 +244,8 @@ const Status=({results,loading})=>{
 };
 
 export default function App(){
-  const[apiKey,setApiKey]=useState("");
-  const[apiIn,setApiIn]=useState("");
+  const[apiKey,setApiKey]=useState(DEFAULT_KEY);
+  const[apiIn,setApiIn]=useState(DEFAULT_KEY);
   const[view,setView]=useState("markets");
   const[selId,setSelId]=useState(null);
   const[pt,setPt]=useState("2br");
@@ -225,7 +255,17 @@ export default function App(){
   const[apiRes,setApiRes]=useState({});
   const[ld,setLd]=useState({});
   const[addr,setAddr]=useState("");
+  const[liveMarket,setLiveMarket]=useState(MARKETS[0].id);
   const sO=(k,v)=>setOv(p=>({...p,[k]:v}));
+
+  // Auto-fetch live data whenever the user opens the Live tab with a valid key
+  useEffect(()=>{
+    if(view==="live"&&apiKey){
+      const m=MARKETS.find(m=>m.id===liveMarket);
+      if(m&&!apiRes[liveMarket]&&!ld[liveMarket])fetchMkt(m);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[view,apiKey,liveMarket]);
 
   const analysis=useMemo(()=>MARKETS.map(m=>({...m,cf:calcCF(m,pt,ov)})),[pt,ov]);
   const filtered=useMemo(()=>{
@@ -236,21 +276,63 @@ export default function App(){
   const sel=selId?analysis.find(m=>m.id===selId):null;
 
   const fetchMkt=useCallback(async(m)=>{
-    if(!apiKey)return;setLd(p=>({...p,[m.id]:true}));
-    const city=m.name.replace(/ \/.*/,""),beds=pt==="studio"?0:parseInt(pt);
+    if(!apiKey)return;
+    setLd(p=>({...p,[m.id]:true}));
+    const city=m.name.replace(/ \/.*/,"");
+    // Airbnb date window: ~30 days out, 3-night stay
+    const d0=new Date();d0.setDate(d0.getDate()+30);
+    const d1=new Date(d0);d1.setDate(d1.getDate()+3);
+    const fd=d=>d.toISOString().split("T")[0];
     const res=await Promise.all([
-      tryApi("mashvisor",()=>api(RH.mash,"/v1.1/client/city/overview",{city:city.replace(/ /g,"+"),state:m.state},apiKey)),
-      tryApi("zillow",()=>api(RH.zil,"/propertyExtendedSearch",{location:`${city}, ${m.state}`,home_type:"Apartments,Condos,Townhomes",sort:"Price_Low_High",status_type:"ForSale"},apiKey)),
-      tryApi("airbnb",()=>api(RH.air,"/api/v2/search",{lat:m.lat,lng:m.lng,radius:15,currency:"USD",adults:2,page:1},apiKey)),
-      tryApi("income",()=>api(RH.inc,"/api/v3/create",{lat:m.lat,lng:m.lng,bedrooms:beds,country:"us"},apiKey)),
+      // 1. Zillow Realtime Scraper — live property search
+      tryApi("zillow",()=>api(RH.zil,"/search",{
+        location:`${city}, ${m.state}`,
+        page:"1",
+      },apiKey)),
+      // 2. Airbnb13 — active listings with live nightly rates
+      tryApi("airbnb",()=>api(RH.air,"/search_property",{
+        location:`${city}, ${m.state}`,
+        checkin:fd(d0),
+        checkout:fd(d1),
+        adults:"2",
+        page:"1",
+        currency:"USD",
+      },apiKey)),
+      // 3. US Real Estate — MLS / Redfin listing data
+      tryApi("mls",()=>api(RH.re,"/for-sale",{
+        city,
+        state_code:m.state,
+        limit:"10",
+        offset:"0",
+      },apiKey)),
+      // 4. Mashvisor STR analytics (bonus source — may need paid plan)
+      tryApi("str_data",()=>api(RH.mash,"/v1.1/client/city/overview",{
+        city:city.replace(/ /g,"+"),
+        state:m.state,
+      },apiKey)),
     ]);
-    setApiRes(p=>({...p,[m.id]:res}));setLd(p=>({...p,[m.id]:false}));
+    setApiRes(p=>({...p,[m.id]:res}));
+    setLd(p=>({...p,[m.id]:false}));
   },[apiKey,pt]);
 
   const searchAddr=useCallback(async()=>{
-    if(!apiKey||!addr)return;setLd(p=>({...p,a:true}));
-    const r=await tryApi("zillow",()=>api(RH.zil,"/propertyExtendedSearch",{location:addr,home_type:"Apartments,Condos,Townhomes",sort:"Price_Low_High",status_type:"ForSale"},apiKey));
-    setApiRes(p=>({...p,a:[r]}));setLd(p=>({...p,a:false}));
+    if(!apiKey||!addr)return;
+    setLd(p=>({...p,a:true}));
+    const res=await Promise.all([
+      // Zillow Realtime Scraper — address / city search
+      tryApi("zillow",()=>api(RH.zil,"/search",{
+        location:addr,
+        page:"1",
+      },apiKey)),
+      // MLS / US Real Estate address search
+      tryApi("mls",()=>api(RH.re,"/for-sale",{
+        location:addr,
+        limit:"10",
+        offset:"0",
+      },apiKey)),
+    ]);
+    setApiRes(p=>({...p,a:res}));
+    setLd(p=>({...p,a:false}));
   },[apiKey,addr]);
 
   const mR=sel?apiRes[sel.id]:null;
@@ -448,76 +530,233 @@ export default function App(){
       {/* LIVE */}
       {view==="live"&&(
         <div style={{padding:"14px 12px"}}>
-          <h2 style={{fontSize:16,fontWeight:700,marginBottom:6}}>🔴 Live API Integration</h2>
-          <div style={{...crd,borderColor:"rgba(251,191,36,0.2)",background:"rgba(251,191,36,0.04)",marginBottom:14}}>
-            <div style={{fontSize:13,fontWeight:600,color:C.yellow,marginBottom:6}}>⚡ Deploy to unlock live data</div>
-            <div style={{fontSize:12,color:"#8a9bb5",lineHeight:1.6}}>
-              API calls are blocked in the Claude preview sandbox. To use live Mashvisor, Zillow, Airbnb, and Income Prediction data, run this app locally or deploy it. The API integration code is fully built in — just needs a non-sandboxed environment.
+          <h2 style={{fontSize:16,fontWeight:700,marginBottom:10}}>🔴 Live Market Data</h2>
+
+          {/* ── Controls: market picker + fetch button ── */}
+          <div style={{...crd,marginBottom:12}}>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:8}}>
+              <select
+                value={liveMarket}
+                onChange={e=>setLiveMarket(e.target.value)}
+                style={{flex:"1 1 200px",background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:8,padding:"8px 12px",color:"#e8edf5",fontSize:13,outline:"none"}}
+              >
+                {MARKETS.map(m=><option key={m.id} value={m.id} style={{background:"#0f1729"}}>{m.name} ({m.state})</option>)}
+              </select>
+              <button
+                onClick={()=>fetchMkt(MARKETS.find(m=>m.id===liveMarket))}
+                disabled={!apiKey||ld[liveMarket]}
+                style={{padding:"8px 18px",borderRadius:8,border:"none",cursor:apiKey&&!ld[liveMarket]?"pointer":"not-allowed",fontSize:12,fontWeight:600,background:apiKey?C.blue:"rgba(255,255,255,0.08)",color:apiKey?"#0a0e1a":"#556178",flexShrink:0}}
+              >{ld[liveMarket]?"Fetching…":"Fetch Live Data"}</button>
             </div>
+            {/* Address / city search */}
+            <div style={{display:"flex",gap:8}}>
+              <input type="text" placeholder="Search any address or city (e.g. 'Breckenridge, CO')…" value={addr} onChange={e=>setAddr(e.target.value)} onKeyDown={e=>e.key==="Enter"&&searchAddr()}/>
+              <button onClick={searchAddr} disabled={!apiKey||!addr||ld.a} style={{padding:"7px 14px",borderRadius:8,border:"none",cursor:apiKey&&addr?"pointer":"not-allowed",fontSize:11,fontWeight:600,background:apiKey&&addr?C.cyan:"rgba(255,255,255,0.08)",color:apiKey&&addr?"#0a0e1a":"#556178",flexShrink:0}}>{ld.a?"…":"Search"}</button>
+            </div>
+            {!apiKey&&<div style={{fontSize:11,color:C.yellow,marginTop:8}}>⚠ Enter your RapidAPI key in the header to enable live data fetching.</div>}
           </div>
 
-          <div className="g2">
-            <div style={crd}>
-              <div style={{fontSize:13,fontWeight:600,color:C.blue,marginBottom:10}}>🚀 Quick Start (2 min)</div>
-              <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:11,color:"#8a9bb5",lineHeight:1.8}}>
-                <div style={{color:"#556178",marginBottom:4}}># Create React app</div>
-                <div style={{color:"#e8edf5",background:"rgba(0,0,0,0.3)",padding:"8px 10px",borderRadius:6,marginBottom:8,wordBreak:"break-all"}}>npx create-react-app ski-analyzer<br/>cd ski-analyzer</div>
-                <div style={{color:"#556178",marginBottom:4}}># Install recharts</div>
-                <div style={{color:"#e8edf5",background:"rgba(0,0,0,0.3)",padding:"8px 10px",borderRadius:6,marginBottom:8}}>npm install recharts</div>
-                <div style={{color:"#556178",marginBottom:4}}># Replace src/App.js with this file, then:</div>
-                <div style={{color:"#e8edf5",background:"rgba(0,0,0,0.3)",padding:"8px 10px",borderRadius:6}}>npm start</div>
-              </div>
-            </div>
+          {/* ── API status pills ── */}
+          {apiRes[liveMarket]&&<div style={{marginBottom:10}}><Status results={apiRes[liveMarket]} loading={ld[liveMarket]}/></div>}
 
-            <div style={crd}>
-              <div style={{fontSize:13,fontWeight:600,color:C.green,marginBottom:10}}>🔑 RapidAPI Setup</div>
-              <div style={{fontSize:12,color:"#8a9bb5",lineHeight:1.6,marginBottom:10}}>
-                One key works across all 4 APIs. Create a free RapidAPI account, subscribe to each:
-              </div>
-              {[
-                {n:"Mashvisor",d:"STR occupancy, ADR, investment metrics by city",c:C.purple,u:"mashvisor.p.rapidapi.com"},
-                {n:"Zillow (Unofficial)",d:"For-sale listings, Zestimates, property search",c:C.blue,u:"zillow-com1.p.rapidapi.com"},
-                {n:"Airbnb Search",d:"Live Airbnb listings, nightly rates, ratings",c:C.red,u:"airbnb-search.p.rapidapi.com"},
-                {n:"Income Prediction",d:"Revenue estimates by lat/lng + bedrooms",c:C.yellow,u:"airbnb-income-prediction.p.rapidapi.com"},
-              ].map((a,i)=>(
-                <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid rgba(255,255,255,0.04)",gap:8}}>
-                  <div>
-                    <div style={{fontSize:12,fontWeight:600,color:a.c}}>{a.n}</div>
-                    <div style={{fontSize:10,color:"#556178"}}>{a.d}</div>
-                  </div>
-                  <div style={{fontSize:9,color:"#3d4a5e",fontFamily:"'JetBrains Mono',monospace",textAlign:"right",flexShrink:0,alignSelf:"center"}}>{a.u}</div>
+          {/* ── Zillow listings ── */}
+          {(()=>{
+            const zR=apiRes[liveMarket]?.find(r=>r.source==="zillow");
+            if(!zR)return null;
+            // Realtime Scraper returns props[] — field names: area (sqft), bedrooms, bathrooms, price, zestimate, rentZestimate
+            const props=zR.data?.props||[];
+            const total=zR.data?.totalResultCount||zR.data?.resultsCount||null;
+            return(
+              <div style={{...crd,marginBottom:12}}>
+                <div style={{fontSize:13,fontWeight:600,color:C.blue,marginBottom:8}}>
+                  🏠 Zillow Realtime Listings — {MARKETS.find(m=>m.id===liveMarket)?.name}
+                  {total?<span style={{fontSize:10,color:"#556178",marginLeft:8}}>{total} total found</span>:null}
+                  <span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>real-time-zillow-data</span>
                 </div>
-              ))}
-            </div>
-          </div>
+                {zR.error?<div style={{fontSize:11,color:C.red}}>⚠ {zR.error}</div>:(
+                  props.length===0?<div style={{fontSize:11,color:"#556178"}}>No listings returned — check your Zillow Realtime Scraper subscription on RapidAPI.</div>:
+                  <div style={{display:"grid",gap:6}}>
+                    {props.slice(0,6).map((p,i)=>{
+                      // Handle both old (livingArea) and new (area) field names
+                      const sqft=p.livingArea||p.area||null;
+                      return(
+                        <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"8px 10px",background:"rgba(255,255,255,0.03)",borderRadius:6,gap:8,flexWrap:"wrap"}}>
+                          <div>
+                            <div style={{fontSize:12,fontWeight:600,color:"#e8edf5"}}>{p.address||"—"}</div>
+                            <div style={{fontSize:10,color:"#556178",marginTop:2}}>
+                              {[p.bedrooms&&`${p.bedrooms}bd`,p.bathrooms&&`${p.bathrooms}ba`,sqft&&`${fmt(sqft)} sqft`,p.rentZestimate&&`RentZest $${fmt(p.rentZestimate)}/mo`].filter(Boolean).join(" · ")}
+                            </div>
+                          </div>
+                          <div style={{textAlign:"right",flexShrink:0}}>
+                            <div style={{fontSize:14,fontWeight:700,color:C.green,fontFamily:"'JetBrains Mono',monospace"}}>{p.price?fmtC(p.price):"—"}</div>
+                            {p.zestimate?<div style={{fontSize:9,color:"#556178"}}>Zest {fmtC(p.zestimate)}</div>:null}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
-          <div style={{...crd,marginTop:14}}>
-            <div style={{fontSize:13,fontWeight:600,color:C.purple,marginBottom:10}}>📊 What you get with live data</div>
+          {/* ── Airbnb live listings ── */}
+          {(()=>{
+            const aR=apiRes[liveMarket]?.find(r=>r.source==="airbnb");
+            if(!aR)return null;
+            // airbnb13 wraps results in different shapes depending on version
+            const list=(aR.data?.results?.searchResults||aR.data?.searchResults||aR.data?.results||[]);
+            return(
+              <div style={{...crd,marginBottom:12}}>
+                <div style={{fontSize:13,fontWeight:600,color:C.red,marginBottom:8}}>🏠 Airbnb Active Listings</div>
+                {aR.error?<div style={{fontSize:11,color:C.red}}>⚠ {aR.error}</div>:(
+                  list.length===0?<div style={{fontSize:11,color:"#556178"}}>No listings returned — check your Airbnb13 subscription on RapidAPI.</div>:
+                  <div style={{display:"grid",gap:6}}>
+                    {list.slice(0,6).map((r,i)=>{
+                      const listing=r.listing||r;
+                      const nightlyAmt=r.pricingQuote?.rate?.amount||r.price?.rate||r.nightly_price||null;
+                      const rating=listing.avgRating||listing.avg_rating||listing.star_rating||null;
+                      const reviews=listing.reviewsCount||listing.reviews_count||0;
+                      return(
+                        <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"8px 10px",background:"rgba(255,255,255,0.03)",borderRadius:6,gap:8,flexWrap:"wrap"}}>
+                          <div>
+                            <div style={{fontSize:12,fontWeight:600,color:"#e8edf5"}}>{listing.name||`Listing ${i+1}`}</div>
+                            <div style={{fontSize:10,color:"#556178",marginTop:2}}>
+                              {[rating&&`★ ${Number(rating).toFixed(2)}`,reviews>0&&`(${reviews} reviews)`,listing.roomType||listing.room_type].filter(Boolean).join(" · ")}
+                            </div>
+                          </div>
+                          <div style={{textAlign:"right",flexShrink:0}}>
+                            {nightlyAmt?<div style={{fontSize:14,fontWeight:700,color:C.yellow,fontFamily:"'JetBrains Mono',monospace"}}>${fmt(nightlyAmt)}/nt</div>:<div style={{fontSize:11,color:"#556178"}}>—</div>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* ── MLS / US Real Estate ── */}
+          {(()=>{
+            const mR2=apiRes[liveMarket]?.find(r=>r.source==="mls");
+            if(!mR2)return null;
+            // us-real-estate wraps under data.home_search.results or data.results
+            const items=mR2.data?.data?.home_search?.results||mR2.data?.results||mR2.data?.properties||[];
+            return(
+              <div style={{...crd,marginBottom:12}}>
+                <div style={{fontSize:13,fontWeight:600,color:C.purple,marginBottom:8}}>📋 MLS / US Real Estate Listings</div>
+                {mR2.error?<div style={{fontSize:11,color:C.red}}>⚠ {mR2.error}</div>:(
+                  items.length===0?<div style={{fontSize:11,color:"#556178"}}>No MLS listings returned — check your US Real Estate subscription on RapidAPI.</div>:
+                  <div style={{display:"grid",gap:6}}>
+                    {items.slice(0,5).map((p,i)=>{
+                      const price=p.list_price||p.price||p.listPrice||null;
+                      const desc=p.description||{};
+                      const addr2=p.location?.address||p.address||{};
+                      const street=addr2.line||addr2.street||p.streetAddress||"—";
+                      return(
+                        <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"8px 10px",background:"rgba(255,255,255,0.03)",borderRadius:6,gap:8,flexWrap:"wrap"}}>
+                          <div>
+                            <div style={{fontSize:12,fontWeight:600,color:"#e8edf5"}}>{street}</div>
+                            <div style={{fontSize:10,color:"#556178",marginTop:2}}>
+                              {[(desc.beds||p.bedrooms)&&`${desc.beds||p.bedrooms}bd`,(desc.baths_full||p.bathrooms)&&`${desc.baths_full||p.bathrooms}ba`,(desc.sqft||p.sqft)&&`${fmt(desc.sqft||p.sqft)} sqft`].filter(Boolean).join(" · ")}
+                            </div>
+                          </div>
+                          <div style={{textAlign:"right",flexShrink:0}}>
+                            {price?<div style={{fontSize:14,fontWeight:700,color:C.purple,fontFamily:"'JetBrains Mono',monospace"}}>{fmtC(price)}</div>:<div style={{fontSize:11,color:"#556178"}}>—</div>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* ── Mashvisor STR analytics ── */}
+          {(()=>{
+            const sR=apiRes[liveMarket]?.find(r=>r.source==="str_data");
+            if(!sR)return null;
+            const d=sR.data?.result||sR.data;
+            const ab=d?.airbnb;
+            return(
+              <div style={{...crd,marginBottom:12}}>
+                <div style={{fontSize:13,fontWeight:600,color:C.orange,marginBottom:8}}>📊 STR Market Analytics (Mashvisor)</div>
+                {sR.error
+                  ?<div style={{fontSize:11,color:C.yellow}}>⚠ {sR.error} — Mashvisor may require a paid subscription or has updated its endpoints.</div>
+                  :ab?(
+                    <div className="gm">
+                      {[["Airbnb Occ",ab.occupancy?`${Math.round(ab.occupancy*100)}%`:null],["Avg Daily Rate",ab.average_daily_rate?fmtC(ab.average_daily_rate):null],["Annual Revenue",ab.rental_income?fmtC(ab.rental_income)+"/yr":null]].filter(([,v])=>v).map(([l,v],i)=><Metric key={i} label={l} value={v} color={C.orange}/>)}
+                    </div>
+                  ):<div style={{fontSize:11,color:"#556178"}}>No STR data returned.</div>
+                }
+              </div>
+            );
+          })()}
+
+          {/* ── Address search results ── */}
+          {apiRes.a&&(
+            <div style={{...crd,marginBottom:12}}>
+              <div style={{fontSize:13,fontWeight:600,color:C.cyan,marginBottom:8}}>🔍 Address Search Results</div>
+              <Status results={apiRes.a} loading={ld.a}/>
+              {apiRes.a.map((r,ri)=>{
+                const props2=r.data?.props||r.data?.results||r.data?.data?.home_search?.results||[];
+                return r.error?(
+                  <div key={ri} style={{fontSize:11,color:C.red,marginTop:6}}>⚠ {r.source}: {r.error}</div>
+                ):(
+                  <div key={ri} style={{marginTop:8,display:"grid",gap:6}}>
+                    {props2.slice(0,4).map((p,i)=>{
+                      const price2=p.price||p.list_price||null;
+                      const addr3=p.address||(p.location?.address?.line)||"—";
+                      return(
+                        <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"8px 10px",background:"rgba(255,255,255,0.03)",borderRadius:6,gap:8}}>
+                          <div>
+                            <div style={{fontSize:12,fontWeight:600,color:"#e8edf5"}}>{addr3}</div>
+                            <div style={{fontSize:10,color:"#556178"}}>{[p.bedrooms&&`${p.bedrooms}bd`,p.bathrooms&&`${p.bathrooms}ba`,(p.livingArea||p.area)&&`${fmt(p.livingArea||p.area)} sqft`].filter(Boolean).join(" · ")}</div>
+                          </div>
+                          <div style={{fontFamily:"'JetBrains Mono',monospace",fontWeight:700,color:C.cyan,fontSize:13,flexShrink:0}}>{price2?fmtC(price2):"—"}</div>
+                        </div>
+                      );
+                    })}
+                    {props2.length===0&&<div style={{fontSize:11,color:"#556178"}}>{r.source}: no results.</div>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* ── API Setup Guide ── */}
+          <div style={{...crd,borderColor:"rgba(251,191,36,0.15)",marginBottom:10}}>
+            <div style={{fontSize:13,fontWeight:600,color:C.yellow,marginBottom:10}}>🔑 RapidAPI Setup — Subscribe to each API (one key unlocks all)</div>
             <div className="g2">
               {[
-                {title:"Market Validation",items:["Real occupancy rates vs our baseline estimates","Actual ADR from Mashvisor analytics","Live Airbnb comp listings with nightly rates"]},
-                {title:"Property Sourcing",items:["Zillow for-sale listings searchable by city/address","Price, beds, baths, sqft for investment sizing","Income prediction for any lat/lng coordinate"]},
-              ].map((sec,i)=>(
-                <div key={i}>
-                  <div style={{fontSize:11,fontWeight:600,color:"#8a9bb5",marginBottom:6}}>{sec.title}</div>
-                  {sec.items.map((item,j)=>(
-                    <div key={j} style={{fontSize:11,color:"#7a8ba5",padding:"3px 0",display:"flex",gap:6}}>
-                      <span style={{color:C.green,flexShrink:0}}>✓</span>{item}
-                    </div>
-                  ))}
+                {n:"Zillow Realtime Scraper",h:"real-time-zillow-data.p.rapidapi.com",d:"Live for-sale listings, Zestimate, RentZestimate — MCP-enabled",c:C.blue,ok:true},
+                {n:"Airbnb13",h:"airbnb13.p.rapidapi.com",d:"Live Airbnb listings, nightly rates, ratings — 700k+ subscribers",c:C.red,ok:true},
+                {n:"US Real Estate",h:"us-real-estate.p.rapidapi.com",d:"MLS / Redfin listing data — great Zillow alternative",c:C.purple,ok:true},
+                {n:"Mashvisor STR",h:"mashvisor.p.rapidapi.com",d:"STR city-level occupancy & ADR analytics — may need paid plan",c:C.orange,ok:false},
+              ].map((a,i)=>(
+                <div key={i} style={{padding:"8px 10px",background:"rgba(255,255,255,0.02)",borderRadius:6,border:`1px solid ${a.c}22`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:2,gap:4}}>
+                    <span style={{fontSize:12,fontWeight:600,color:a.c}}>{a.n}</span>
+                    <span style={{fontSize:9,color:a.ok?C.green:C.yellow,flexShrink:0}}>{a.ok?"✓ Active":"⚠ May need paid plan"}</span>
+                  </div>
+                  <div style={{fontSize:10,color:"#7a8ba5",marginBottom:4}}>{a.d}</div>
+                  <div style={{fontSize:9,fontFamily:"'JetBrains Mono',monospace",color:"#3d4a5e"}}>{a.h}</div>
                 </div>
               ))}
             </div>
           </div>
 
-          <div style={{...crd,marginTop:14,borderColor:"rgba(99,179,237,0.15)"}}>
-            <div style={{fontSize:13,fontWeight:600,color:C.blue,marginBottom:8}}>💡 Alternative: Vercel deploy</div>
-            <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:11,color:"#8a9bb5",lineHeight:1.8}}>
-              <div style={{color:"#e8edf5",background:"rgba(0,0,0,0.3)",padding:"8px 10px",borderRadius:6,wordBreak:"break-all"}}>
-                npm i -g vercel<br/>vercel --yes
-              </div>
+          {/* ── Deploy / CORS note ── */}
+          <div style={{...crd,borderColor:"rgba(99,179,237,0.12)"}}>
+            <div style={{fontSize:12,fontWeight:600,color:C.blue,marginBottom:6}}>💡 CORS / Deployment Note</div>
+            <div style={{fontSize:11,color:"#556178",lineHeight:1.6}}>
+              RapidAPI supports browser requests from deployed domains. If you see CORS errors, run locally (<code style={{background:"rgba(255,255,255,0.06)",padding:"1px 5px",borderRadius:3,fontFamily:"'JetBrains Mono',monospace"}}>npm run dev</code>) or deploy free in ~30 sec:
             </div>
-            <div style={{fontSize:11,color:"#556178",marginTop:6}}>Free tier. Live URL in 30 seconds. Share with partners.</div>
+            <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:11,color:"#e8edf5",background:"rgba(0,0,0,0.3)",padding:"8px 10px",borderRadius:6,marginTop:8,wordBreak:"break-all"}}>
+              npm i -g vercel &amp;&amp; vercel --yes
+            </div>
           </div>
         </div>
       )}

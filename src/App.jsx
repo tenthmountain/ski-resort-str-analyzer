@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ComposedChart, Area, Line } from "recharts";
 
 const MARKETS = [
@@ -257,6 +257,15 @@ export default function App(){
   const[addr,setAddr]=useState("");
   const[liveMarket,setLiveMarket]=useState(MARKETS[0].id);
   const sO=(k,v)=>setOv(p=>({...p,[k]:v}));
+
+  // Auto-fetch live data whenever the user opens the Live tab with a valid key
+  useEffect(()=>{
+    if(view==="live"&&apiKey){
+      const m=MARKETS.find(m=>m.id===liveMarket);
+      if(m&&!apiRes[liveMarket]&&!ld[liveMarket])fetchMkt(m);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[view,apiKey,liveMarket]);
 
   const analysis=useMemo(()=>MARKETS.map(m=>({...m,cf:calcCF(m,pt,ov)})),[pt,ov]);
   const filtered=useMemo(()=>{
