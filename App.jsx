@@ -258,15 +258,6 @@ export default function App(){
   const[liveMarket,setLiveMarket]=useState(MARKETS[0].id);
   const sO=(k,v)=>setOv(p=>({...p,[k]:v}));
 
-  // Auto-fetch live data whenever the user opens the Live tab with a valid key
-  useEffect(()=>{
-    if(view==="live"&&apiKey){
-      const m=MARKETS.find(m=>m.id===liveMarket);
-      if(m&&!apiRes[liveMarket]&&!ld[liveMarket])fetchMkt(m);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[view,apiKey,liveMarket]);
-
   const analysis=useMemo(()=>MARKETS.map(m=>({...m,cf:calcCF(m,pt,ov)})),[pt,ov]);
   const filtered=useMemo(()=>{
     let f=analysis;if(sf!=="all")f=f.filter(m=>m.state===sf);
@@ -298,8 +289,8 @@ export default function App(){
         page:"1",
         currency:"USD",
       },apiKey)),
-      // 3. US Real Estate — MLS / Redfin listing data
-      tryApi("mls",()=>api(RH.re,"/for-sale",{
+      // 3. US Real Estate v2 — MLS / Redfin listing data
+      tryApi("mls",()=>api(RH.re,"/v2/for-sale",{
         city,
         state_code:m.state,
         limit:"10",
@@ -313,7 +304,7 @@ export default function App(){
     ]);
     setApiRes(p=>({...p,[m.id]:res}));
     setLd(p=>({...p,[m.id]:false}));
-  },[apiKey,pt]);
+  },[apiKey]);  // pt removed — not used in fetch params
 
   const searchAddr=useCallback(async()=>{
     if(!apiKey||!addr)return;
@@ -324,8 +315,8 @@ export default function App(){
         location:addr,
         page:"1",
       },apiKey)),
-      // MLS / US Real Estate address search
-      tryApi("mls",()=>api(RH.re,"/for-sale",{
+      // MLS / US Real Estate v2 address search
+      tryApi("mls",()=>api(RH.re,"/v2/for-sale",{
         location:addr,
         limit:"10",
         offset:"0",
@@ -336,6 +327,15 @@ export default function App(){
   },[apiKey,addr]);
 
   const mR=sel?apiRes[sel.id]:null;
+
+  // Auto-fetch when user opens the Live tab and has a key — defined after
+  // fetchMkt so the closure captures the correct (stable) reference.
+  useEffect(()=>{
+    if(view==="live"&&apiKey){
+      const m=MARKETS.find(m=>m.id===liveMarket);
+      if(m&&!apiRes[liveMarket]&&!ld[liveMarket])fetchMkt(m);
+    }
+  },[view,apiKey,liveMarket,fetchMkt]);  // fetchMkt stable — only changes when apiKey changes
 
   return(
     <div style={{minHeight:"100vh",background:"linear-gradient(145deg,#080c16 0%,#0f1729 40%,#0c1322 100%)",color:"#e8edf5",fontFamily:"'DM Sans',-apple-system,sans-serif",overflowX:"hidden",width:"100%"}}>
