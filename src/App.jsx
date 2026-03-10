@@ -211,6 +211,59 @@ async function tryEndpoints(src,host,paths,paramsFn,key){
   return{source:src,error:`No working endpoint found on ${host}. Tried: ${paths.join(", ")}`,endpoint:null};
 }
 
+// AirDNA requires a 2-step flow:
+//   1. market/search → get market_id
+//   2. parallel calls for occupancy + ADR + revenue
+// Falls back to rentalizer (lat/lng, single call) if market search fails.
+async function fetchAirDNA(city,state,lat,lng,key){
+  // Dates: last 12 months
+  const d=new Date();
+  const end=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+  const ds=new Date(d);ds.setFullYear(ds.getFullYear()-1);
+  const start=`${ds.getFullYear()}-${String(ds.getMonth()+1).padStart(2,"0")}`;
+
+  // ── Option A: Rentalizer (lat/lng, single call, returns occ+ADR+revenue) ──
+  const RENTALIZER_PATHS=[
+    "/api/enterprise/v2/rentalizer/estimate",
+    "/rentalizer/estimate","/rentalizer","/v2/rentalizer",
+  ];
+  for(const path of RENTALIZER_PATHS){
+    const rz=await tryApi("airdna",()=>api(RH.adn,path,{lat:String(lat),lng:String(lng),bedrooms:"2",bathrooms:"2",currency:"USD"},key));
+    if(!rz.error){return{...rz,endpoint:path,mode:"rentalizer"};}
+    if(rz.error.includes("subscri")||rz.error.includes("403"))return{source:"airdna",error:rz.error,endpoint:path};
+  }
+
+  // ── Option B: Market search → occupancy + ADR + revenue ──
+  const MARKET_SEARCH_PATHS=[
+    "/api/enterprise/v2/market/search","/market/search","/v2/market/search","/search",
+  ];
+  let marketId=null, searchEndpoint=null;
+  for(const path of MARKET_SEARCH_PATHS){
+    const ms=await tryApi("airdna",()=>api(RH.adn,path,{search_term:`${city}, ${state}`},key));
+    if(!ms.error){
+      const arr=ms.data?.markets||ms.data?.results||ms.data?.data||(Array.isArray(ms.data)?ms.data:[]);
+      const first=Array.isArray(arr)?arr[0]:arr;
+      marketId=first?.market_id||first?.id||null;
+      if(marketId){searchEndpoint=path;break;}
+    }
+    if(ms.error?.includes("subscri")||ms.error?.includes("403"))return{source:"airdna",error:ms.error,endpoint:path};
+  }
+  if(!marketId)return{source:"airdna",error:"AirDNA: could not find market ID. Try the rentalizer estimate endpoint.",endpoint:searchEndpoint};
+
+  const OCC_PATHS=["/api/enterprise/v2/market/occupancy","/market/occupancy","/v2/market/occupancy"];
+  const ADR_PATHS=["/api/enterprise/v2/market/adr","/market/adr","/v2/market/adr"];
+  const REV_PATHS=["/api/enterprise/v2/market/revenue","/market/revenue","/v2/market/revenue"];
+  const p={market_id:String(marketId),start_date:start,end_date:end};
+
+  const [occ,adrD,revD]=await Promise.all([
+    (async()=>{for(const ph of OCC_PATHS){const r=await tryApi("occ",()=>api(RH.adn,ph,p,key));if(!r.error)return r;}return{error:"occ unavail"}})(),
+    (async()=>{for(const ph of ADR_PATHS){const r=await tryApi("adr",()=>api(RH.adn,ph,p,key));if(!r.error)return r;}return{error:"adr unavail"}})(),
+    (async()=>{for(const ph of REV_PATHS){const r=await tryApi("rev",()=>api(RH.adn,ph,p,key));if(!r.error)return r;}return{error:"rev unavail"}})(),
+  ]);
+
+  return{source:"airdna",data:{marketId,occupancy:occ?.data,adr:adrD?.data,revenue:revD?.data},endpoint:`${searchEndpoint}→market/[occ|adr|rev]`,mode:"market"};
+}
+
 const C={green:"#34d399",red:"#f87171",blue:"#63b3ed",yellow:"#fbbf24",purple:"#a78bfa",orange:"#fb923c",cyan:"#22d3ee"};
 const stClr=(st)=>st==="CO"?C.blue:st==="VT"?C.green:st==="WY"?C.orange:C.cyan;
 const crd={background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:10,padding:"12px 14px"};
@@ -287,16 +340,13 @@ export default function App(){
         "/search","/propertyExtendedSearch","/forsaleByHomeType",
         "/properties/list","/v2/search","/searchByUrl",
       ],path=>({location:loc,page:"1"}),apiKey),
-      // 2. Airbnb Market & Rental Intelligence
+      // 2. Airbnb Market & Rental Intelligence — per API docs, /search is primary
       tryEndpoints("airbnb",RH.air,[
-        "/search","/listings","/search-listings","/v2/search",
-        "/market","/properties","/intelligence",
+        "/search","/api/v1/searchPropertyByPlace","/listings",
+        "/search-listings","/v2/search","/market","/properties",
       ],path=>({location:loc,checkin:ci,checkout:co,adults:"2",currency:"USD",page:"1"}),apiKey),
-      // 3. AirDNA — STR market analytics
-      tryEndpoints("airdna",RH.adn,[
-        "/market","/market/search","/market/occupancy","/rentalizer",
-        "/v1/market","/search","/MarketStats","/market/rating",
-      ],path=>({location:loc,currency:"USD"}),apiKey),
+      // 3. AirDNA — 2-step: market/search → occupancy+ADR+revenue (or rentalizer)
+      fetchAirDNA(city,m.state,m.lat,m.lng,apiKey),
     ]);
     setApiRes(p=>({...p,[m.id]:res}));
     setLd(p=>({...p,[m.id]:false}));
@@ -601,7 +651,7 @@ export default function App(){
                           <div>
                             <div style={{fontSize:12,fontWeight:600,color:"#e8edf5"}}>{p.address||"—"}</div>
                             <div style={{fontSize:10,color:"#556178",marginTop:2}}>
-                              {[p.bedrooms&&`${p.bedrooms}bd`,p.bathrooms&&`${p.bathrooms}ba`,sqft&&`${fmt(sqft)} sqft`,p.rentZestimate&&`RentZest $${fmt(p.rentZestimate)}/mo`].filter(Boolean).join(" · ")}
+                              {[(p.bedrooms||p.beds)&&`${p.bedrooms||p.beds}bd`,p.bathrooms&&`${p.bathrooms}ba`,sqft&&`${fmt(sqft)} sqft`,p.rentZestimate&&`RentZest $${fmt(p.rentZestimate)}/mo`].filter(Boolean).join(" · ")}
                             </div>
                           </div>
                           <div style={{textAlign:"right",flexShrink:0}}>
@@ -641,11 +691,12 @@ export default function App(){
                   <div style={{display:"grid",gap:6}}>
                     {list.slice(0,6).map((r,i)=>{
                       const listing=r.listing||r;
-                      const nightlyAmt=r.pricingQuote?.rate?.amount||r.price?.amount||r.price||listing.price||listing.nightly_price||null;
-                      const rating=listing.avgRating||listing.avg_rating||listing.rating||listing.star_rating||null;
-                      const reviews=listing.reviewsCount||listing.reviews_count||listing.reviews||0;
-                      const name=listing.name||r.name||`Listing ${i+1}`;
-                      const roomType=listing.roomType||listing.room_type||r.room_type||null;
+                      // price.rate is the standard field per API docs; fall back to older shapes
+                      const nightlyAmt=r.price?.rate||r.pricingQuote?.rate?.amount||r.price?.amount||listing.price?.rate||listing.price?.amount||listing.nightly_price||null;
+                      const rating=r.rating||listing.rating||listing.avgRating||listing.avg_rating||listing.star_rating||null;
+                      const reviews=r.reviewsCount||listing.reviewsCount||listing.reviews_count||listing.reviews||0;
+                      const name=r.name||listing.name||`Listing ${i+1}`;
+                      const roomType=r.roomType||listing.roomType||r.room_type||listing.room_type||null;
                       return(
                         <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"8px 10px",background:"rgba(255,255,255,0.03)",borderRadius:6,gap:8,flexWrap:"wrap"}}>
                           <div>
@@ -670,25 +721,45 @@ export default function App(){
           {(()=>{
             const adR=apiRes[liveMarket]?.find(r=>r.source==="airdna");
             if(!adR)return null;
-            // AirDNA response — try common field paths
-            const mkt=adR.data?.market||adR.data?.data||adR.data||{};
-            const occ=mkt.occupancy_rate||mkt.occupancy||mkt.avg_occupancy||null;
-            const adr=mkt.average_daily_rate||mkt.adr||mkt.avg_daily_rate||null;
-            const rev=mkt.revenue_potential||mkt.annual_revenue||mkt.avg_annual_revenue||null;
-            const active=mkt.active_listings||mkt.active_rentals||mkt.total_listings||null;
-            const revpar=mkt.revpar||mkt.revenue_per_available||null;
-            const stats=[[`Occupancy`,occ?`${Math.round(occ*(occ<2?100:1))}%`:null],[`Avg Daily Rate`,adr?fmtC(adr):null],[`Revenue/yr`,rev?fmtC(rev):null],[`Active Listings`,active?fmt(active):null],[`RevPAR`,revpar?fmtC(revpar):null]].filter(([,v])=>v);
+
+            // Parse stats — two possible shapes:
+            // A) mode="rentalizer": data.property_stats.{occupancy,adr,revenue}.ltm
+            // B) mode="market":     data.{occupancy,adr,revenue}[last entry].{occupancy_rate,adr,revenue}
+            let occ=null,adr=null,rev=null,active=null,revpar=null;
+            if(adR.data){
+              if(adR.mode==="rentalizer"||adR.data?.property_stats){
+                const ps=adR.data?.property_stats||adR.data;
+                occ=ps?.occupancy?.ltm||ps?.occupancy_rate||null;
+                adr=ps?.adr?.ltm||ps?.average_daily_rate||null;
+                rev=ps?.revenue?.ltm||ps?.annual_revenue||null;
+                revpar=null;
+              } else {
+                // Market mode — take most recent month from each array
+                const occArr=adR.data?.occupancy?.data||adR.data?.occupancy||[];
+                const adrArr=adR.data?.adr?.data||adR.data?.adr||[];
+                const revArr=adR.data?.revenue?.data||adR.data?.revenue||[];
+                const last=a=>(Array.isArray(a)?a[a.length-1]:a)||{};
+                occ=last(occArr).occupancy_rate||null;
+                adr=last(adrArr).adr||null;
+                rev=last(revArr).revenue||null;
+                revpar=last(revArr).revpar||null;
+                // Active listings from occupancy entry
+                active=last(occArr).active_listings||null;
+              }
+            }
+            const stats=[[`Occupancy`,occ!=null?`${Math.round(Number(occ)*(Number(occ)<2?100:1))}%`:null],[`Avg Daily Rate`,adr?fmtC(adr):null],[`Revenue/yr`,rev?fmtC(rev):null],[`Active Listings`,active?fmt(active):null],[`RevPAR`,revpar?fmtC(revpar):null]].filter(([,v])=>v);
             return(
               <div style={{...crd,marginBottom:12}}>
                 <div style={{fontSize:13,fontWeight:600,color:C.orange,marginBottom:8}}>
                   📊 AirDNA STR Market Analytics
-                  {adR.endpoint&&<span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>airdna1{adR.endpoint}</span>}
+                  {adR.endpoint&&<span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>airdna1 {adR.endpoint}</span>}
+                  {adR.mode&&<span style={{fontSize:9,color:"#4a5568",marginLeft:6}}>({adR.mode})</span>}
                 </div>
                 {adR.error
                   ?<div style={{fontSize:11,color:C.red}}>⚠ {adR.error}</div>
                   :stats.length>0
                     ?<div className="gm">{stats.map(([l,v],i)=><Metric key={i} label={l} value={v} color={C.orange}/>)}</div>
-                    :<div style={{fontSize:11,color:"#556178",padding:"4px 0"}}>No STR stats returned — the market endpoint may use different params. Raw: <code style={{fontSize:9,color:"#3d4a5e"}}>{JSON.stringify(adR.data).slice(0,120)}</code></div>
+                    :<div style={{fontSize:11,color:"#556178",padding:"4px 0"}}>No STR stats in response — click "▼ raw JSON" to inspect. Raw: <code style={{fontSize:9,color:"#3d4a5e"}}>{JSON.stringify(adR.data).slice(0,150)}</code></div>
                 }
               </div>
             );
