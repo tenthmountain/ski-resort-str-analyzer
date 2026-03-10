@@ -191,15 +191,25 @@ async function api(host,path,params,key){
   try{r=await fetch(url,{headers:{"x-rapidapi-key":key,"x-rapidapi-host":host}});}
   catch(e){throw new Error("Network/CORS error — run locally (npm run dev) or deploy to Vercel");}
   if(!r.ok){
-    const msg=r.status===401||r.status===403?`Not subscribed — go to rapidapi.com and subscribe to "${host}" with your key`
+    const msg=r.status===401||r.status===403?`Not subscribed to "${host}" on RapidAPI — visit rapidapi.com to subscribe`
              :r.status===429?"Rate limit exceeded — upgrade your RapidAPI plan or wait a moment"
-             :r.status===404?`Endpoint not found on ${host} — API may have changed routes`
-             :`HTTP ${r.status} from ${host}`;
+             :r.status===404?`404 on ${host}${path} — wrong endpoint path`
+             :`HTTP ${r.status} from ${host}${path}`;
     throw new Error(msg);
   }
   return r.json();
 }
 const tryApi=async(src,fn)=>{try{return{source:src,data:await fn()}}catch(e){return{source:src,error:e.message}}};
+
+// Try multiple endpoint paths, return first that doesn't 404/error. Attaches .endpoint to result.
+async function tryEndpoints(src,host,paths,paramsFn,key){
+  for(const path of paths){
+    const params=paramsFn(path);
+    const r=await tryApi(src,()=>api(host,path,params,key));
+    if(!r.error||!r.error.includes("404")){return{...r,endpoint:path};}
+  }
+  return{source:src,error:`No working endpoint found on ${host}. Tried: ${paths.join(", ")}`,endpoint:null};
+}
 
 const C={green:"#34d399",red:"#f87171",blue:"#63b3ed",yellow:"#fbbf24",purple:"#a78bfa",orange:"#fb923c",cyan:"#22d3ee"};
 const stClr=(st)=>st==="CO"?C.blue:st==="VT"?C.green:st==="WY"?C.orange:C.cyan;
@@ -250,6 +260,7 @@ export default function App(){
   const[ld,setLd]=useState({});
   const[addr,setAddr]=useState("");
   const[liveMarket,setLiveMarket]=useState(MARKETS[0].id);
+  const[debugMode,setDebugMode]=useState(false);
   const sO=(k,v)=>setOv(p=>({...p,[k]:v}));
 
   const analysis=useMemo(()=>MARKETS.map(m=>({...m,cf:calcCF(m,pt,ov)})),[pt,ov]);
@@ -264,43 +275,41 @@ export default function App(){
     if(!apiKey)return;
     setLd(p=>({...p,[m.id]:true}));
     const city=m.name.replace(/ \/.*/,"");
+    const loc=`${city}, ${m.state}`;
     // Airbnb date window: ~30 days out, 3-night stay
     const d0=new Date();d0.setDate(d0.getDate()+30);
     const d1=new Date(d0);d1.setDate(d1.getDate()+3);
     const fd=d=>d.toISOString().split("T")[0];
+    const ci=fd(d0),co=fd(d1);
     const res=await Promise.all([
-      // 1. private-zillow — for-sale listings
-      tryApi("zillow",()=>api(RH.zil,"/search",{
-        location:`${city}, ${m.state}`,
-        page:"1",
-      },apiKey)),
-      // 2. Airbnb Market & Rental Intelligence — live listings + nightly rates
-      tryApi("airbnb",()=>api(RH.air,"/search",{
-        location:`${city}, ${m.state}`,
-        checkin:fd(d0),
-        checkout:fd(d1),
-        adults:"2",
-        page:"1",
-        currency:"USD",
-      },apiKey)),
-      // 3. AirDNA — STR market analytics (occupancy, ADR, revenue)
-      tryApi("airdna",()=>api(RH.adn,"/market",{
-        location:`${city}, ${m.state}`,
-        currency:"USD",
-      },apiKey)),
+      // 1. private-zillow — try multiple known endpoint paths
+      tryEndpoints("zillow",RH.zil,[
+        "/search","/propertyExtendedSearch","/forsaleByHomeType",
+        "/properties/list","/v2/search","/searchByUrl",
+      ],path=>({location:loc,page:"1"}),apiKey),
+      // 2. Airbnb Market & Rental Intelligence
+      tryEndpoints("airbnb",RH.air,[
+        "/search","/listings","/search-listings","/v2/search",
+        "/market","/properties","/intelligence",
+      ],path=>({location:loc,checkin:ci,checkout:co,adults:"2",currency:"USD",page:"1"}),apiKey),
+      // 3. AirDNA — STR market analytics
+      tryEndpoints("airdna",RH.adn,[
+        "/market","/market/search","/market/occupancy","/rentalizer",
+        "/v1/market","/search","/MarketStats","/market/rating",
+      ],path=>({location:loc,currency:"USD"}),apiKey),
     ]);
     setApiRes(p=>({...p,[m.id]:res}));
     setLd(p=>({...p,[m.id]:false}));
-  },[apiKey]);  // pt removed — not used in fetch params
+  },[apiKey]);
 
   const searchAddr=useCallback(async()=>{
     if(!apiKey||!addr)return;
     setLd(p=>({...p,a:true}));
     const res=await Promise.all([
-      tryApi("zillow",()=>api(RH.zil,"/search",{
-        location:addr,
-        page:"1",
-      },apiKey)),
+      tryEndpoints("zillow",RH.zil,[
+        "/search","/propertyExtendedSearch","/forsaleByHomeType",
+        "/properties/list","/v2/search",
+      ],()=>({location:addr,page:"1"}),apiKey),
     ]);
     setApiRes(p=>({...p,a:res}));
     setLd(p=>({...p,a:false}));
@@ -536,8 +545,36 @@ export default function App(){
             {!apiKey&&<div style={{fontSize:11,color:C.yellow,marginTop:8}}>⚠ Enter your RapidAPI key in the header to enable live data fetching.</div>}
           </div>
 
-          {/* ── API status pills ── */}
-          {apiRes[liveMarket]&&<div style={{marginBottom:10}}><Status results={apiRes[liveMarket]} loading={ld[liveMarket]}/></div>}
+          {/* ── API status pills + debug toggle ── */}
+          {apiRes[liveMarket]&&(
+            <div style={{marginBottom:10,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+              <Status results={apiRes[liveMarket]} loading={ld[liveMarket]}/>
+              <button onClick={()=>setDebugMode(p=>!p)} style={{marginLeft:"auto",padding:"2px 8px",fontSize:9,borderRadius:4,border:"1px solid rgba(255,255,255,0.1)",background:debugMode?"rgba(251,191,36,0.12)":"transparent",color:debugMode?C.yellow:"#556178",cursor:"pointer",flexShrink:0}}>
+                {debugMode?"▲ hide raw":"▼ raw JSON"}
+              </button>
+            </div>
+          )}
+
+          {/* ── Raw JSON debug panel ── */}
+          {debugMode&&apiRes[liveMarket]&&(
+            <div style={{...crd,borderColor:"rgba(251,191,36,0.2)",marginBottom:12,background:"rgba(0,0,0,0.3)"}}>
+              <div style={{fontSize:11,fontWeight:600,color:C.yellow,marginBottom:8}}>🔬 Raw API Responses — use this to verify endpoint paths &amp; field names</div>
+              {apiRes[liveMarket].map((r,i)=>(
+                <div key={i} style={{marginBottom:10}}>
+                  <div style={{fontSize:10,fontWeight:600,color:r.error?C.red:C.green,marginBottom:4}}>
+                    {r.source} {r.endpoint?<span style={{color:"#556178",fontFamily:"'JetBrains Mono',monospace",fontWeight:400}}>→ {r.endpoint}</span>:null}
+                    {r.error&&<span style={{color:C.red,fontWeight:400}}> — {r.error}</span>}
+                  </div>
+                  {!r.error&&(
+                    <pre style={{fontSize:9,color:"#a8b4c8",background:"rgba(0,0,0,0.4)",padding:"8px 10px",borderRadius:6,overflowX:"auto",maxHeight:200,whiteSpace:"pre-wrap",wordBreak:"break-all"}}>
+                      {JSON.stringify(r.data,null,2).slice(0,2000)}
+                      {JSON.stringify(r.data,null,2).length>2000?"…(truncated)":""}
+                    </pre>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* ── Zillow listings ── */}
           {(()=>{
@@ -551,7 +588,7 @@ export default function App(){
                 <div style={{fontSize:13,fontWeight:600,color:C.blue,marginBottom:8}}>
                   🏠 Zillow Realtime Listings — {MARKETS.find(m=>m.id===liveMarket)?.name}
                   {total?<span style={{fontSize:10,color:"#556178",marginLeft:8}}>{total} total found</span>:null}
-                  <span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>private-zillow</span>
+                  {zR.endpoint&&<span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>private-zillow{zR.endpoint}</span>}
                 </div>
                 {zR.error?<div style={{fontSize:11,color:C.red}}>⚠ {zR.error}</div>:(
                   props.length===0?<div style={{fontSize:11,color:"#556178"}}>No listings returned — check your Zillow Realtime Scraper subscription on RapidAPI.</div>:
@@ -597,7 +634,7 @@ export default function App(){
               <div style={{...crd,marginBottom:12}}>
                 <div style={{fontSize:13,fontWeight:600,color:C.red,marginBottom:8}}>
                   🏠 Airbnb Active Listings
-                  <span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>airbnb-market-rental-intelligence-api</span>
+                  {aR.endpoint&&<span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>airbnb-market-rental-intelligence-api{aR.endpoint}</span>}
                 </div>
                 {aR.error?<div style={{fontSize:11,color:C.red}}>⚠ {aR.error}</div>:(
                   list.length===0?<div style={{fontSize:11,color:"#556178"}}>No listings returned.</div>:
@@ -645,7 +682,7 @@ export default function App(){
               <div style={{...crd,marginBottom:12}}>
                 <div style={{fontSize:13,fontWeight:600,color:C.orange,marginBottom:8}}>
                   📊 AirDNA STR Market Analytics
-                  <span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>airdna1</span>
+                  {adR.endpoint&&<span style={{fontSize:9,color:"#3d4a5e",marginLeft:8,fontFamily:"'JetBrains Mono',monospace"}}>airdna1{adR.endpoint}</span>}
                 </div>
                 {adR.error
                   ?<div style={{fontSize:11,color:C.red}}>⚠ {adR.error}</div>
